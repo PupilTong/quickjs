@@ -55,7 +55,9 @@
 #define DIRECT_DISPATCH  1
 #endif
 
-#if defined(__APPLE__)
+#if defined(QJS_RUST_ALLOCATOR)
+#define MALLOC_OVERHEAD QJS_RUST_ALLOCATOR_OVERHEAD
+#elif defined(__APPLE__)
 #define MALLOC_OVERHEAD  0
 #else
 #define MALLOC_OVERHEAD  8
@@ -66,9 +68,9 @@
 #define CONFIG_PRINTF_RNDN
 #endif
 
-/* define to include Atomics.* operations which depend on the OS
-   threads */
-#if !defined(__EMSCRIPTEN__)
+/* define to include the JavaScript shared-memory intrinsics which depend on
+   OS threads. SharedArrayBuffer is guarded separately when it is installed. */
+#if !defined(__EMSCRIPTEN__) && !defined(QJS_NO_JS_SHARED_MEMORY)
 #define CONFIG_ATOMICS
 #endif
 
@@ -2136,7 +2138,9 @@ void JS_SetRuntimeOpaque(JSRuntime *rt, void *opaque)
 /* default memory allocation functions with memory limitation */
 static size_t js_def_malloc_usable_size(const void *ptr)
 {
-#if defined(__APPLE__)
+#if defined(QJS_RUST_ALLOCATOR)
+    return qjs_rust_malloc_usable_size(ptr);
+#elif defined(__APPLE__)
     return malloc_size(ptr);
 #elif defined(_WIN32)
     return _msize((void *)ptr);
@@ -2229,6 +2233,11 @@ void JS_SetGCThreshold(JSRuntime *rt, size_t gc_threshold)
     rt->malloc_gc_threshold = gc_threshold;
 }
 
+#if defined(QJS_RUST_ALLOCATOR)
+#undef malloc
+#undef free
+#undef realloc
+#endif
 #define malloc(s) malloc_is_forbidden(s)
 #define free(p) free_is_forbidden(p)
 #define realloc(p,s) realloc_is_forbidden(p,s)
@@ -61043,6 +61052,7 @@ int JS_AddIntrinsicTypedArrays(JSContext *ctx)
         return -1;
     JS_FreeValue(ctx, obj);
 
+#if !defined(QJS_NO_JS_SHARED_MEMORY)
     obj = JS_NewCConstructor(ctx, JS_CLASS_SHARED_ARRAY_BUFFER, "SharedArrayBuffer",
                                     js_shared_array_buffer_constructor, 1, JS_CFUNC_constructor, 0,
                                     JS_UNDEFINED,
@@ -61052,6 +61062,7 @@ int JS_AddIntrinsicTypedArrays(JSContext *ctx)
     if (JS_IsException(obj))
         return -1;
     JS_FreeValue(ctx, obj);
+#endif
 
 
     typed_array_base_func =
