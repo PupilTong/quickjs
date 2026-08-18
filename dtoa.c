@@ -28,7 +28,9 @@
 #include <string.h>
 #include <assert.h>
 #include <ctype.h>
+#if !defined(QJS_RUST_TIME_HOST)
 #include <sys/time.h>
+#endif
 #include <math.h>
 #include <setjmp.h>
 

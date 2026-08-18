@@ -28,8 +28,12 @@
 #include <inttypes.h>
 #include <string.h>
 #include <assert.h>
+#if !defined(QJS_RUST_TIME_HOST)
 #include <sys/time.h>
+#endif
+#if !defined(QJS_RUST_TIMEZONE_HOST)
 #include <time.h>
+#endif
 #include <fenv.h>
 #include <math.h>
 #if defined(__APPLE__)
@@ -46,6 +50,14 @@
 #include "libregexp.h"
 #include "libunicode.h"
 #include "dtoa.h"
+
+#if defined(QJS_RUST_TIME_HOST)
+int64_t qjs_rust_epoch_time_milliseconds(void);
+uint64_t qjs_rust_random_seed(void);
+#endif
+#if defined(QJS_RUST_TIMEZONE_HOST)
+int32_t qjs_rust_timezone_offset_minutes(int64_t epoch_milliseconds);
+#endif
 
 #define OPTIMIZE         1
 #define SHORT_OPCODES    1
@@ -47381,9 +47393,13 @@ static uint64_t xorshift64star(uint64_t *pstate)
 
 static void js_random_init(JSContext *ctx)
 {
+#if defined(QJS_RUST_TIME_HOST)
+    ctx->random_state = qjs_rust_random_seed();
+#else
     struct timeval tv;
     gettimeofday(&tv, NULL);
     ctx->random_state = ((int64_t)tv.tv_sec * 1000000) + tv.tv_usec;
+#endif
     /* the state must be non zero */
     if (ctx->random_state == 0)
         ctx->random_state = 1;
@@ -47462,6 +47478,9 @@ static const JSCFunctionListEntry js_math_obj[] = {
    between UTC time and local time 'd' in minutes */
 static int getTimezoneOffset(int64_t time)
 {
+#if defined(QJS_RUST_TIMEZONE_HOST)
+    return qjs_rust_timezone_offset_minutes(time);
+#else
     time_t ti;
     int res;
 
@@ -47512,6 +47531,7 @@ static int getTimezoneOffset(int64_t time)
     }
 #endif
     return res;
+#endif
 }
 
 #if 0
@@ -55404,9 +55424,13 @@ static JSValue get_date_string(JSContext *ctx, JSValueConst this_val,
 
 /* OS dependent: return the UTC time in ms since 1970. */
 static int64_t date_now(void) {
+#if defined(QJS_RUST_TIME_HOST)
+    return qjs_rust_epoch_time_milliseconds();
+#else
     struct timeval tv;
     gettimeofday(&tv, NULL);
     return (int64_t)tv.tv_sec * 1000 + (tv.tv_usec / 1000);
+#endif
 }
 
 static JSValue js_date_constructor(JSContext *ctx, JSValueConst new_target,
