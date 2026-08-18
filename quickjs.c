@@ -28,15 +28,18 @@
 #include <inttypes.h>
 #include <string.h>
 #include <assert.h>
+#if !defined(QJS_RUST_TIME_HOST)
 #include <sys/time.h>
+#endif
+#if !defined(QJS_RUST_TIMEZONE_HOST)
 #include <time.h>
-#include <fenv.h>
+#endif
 #include <math.h>
-#if defined(__APPLE__)
+#if !defined(QJS_RUST_ALLOCATOR) && defined(__APPLE__)
 #include <malloc/malloc.h>
-#elif defined(__linux__) || defined(__GLIBC__)
+#elif !defined(QJS_RUST_ALLOCATOR) && (defined(__linux__) || defined(__GLIBC__))
 #include <malloc.h>
-#elif defined(__FreeBSD__)
+#elif !defined(QJS_RUST_ALLOCATOR) && defined(__FreeBSD__)
 #include <malloc_np.h>
 #endif
 
@@ -47,6 +50,14 @@
 #include "libunicode.h"
 #include "dtoa.h"
 
+#if defined(QJS_RUST_TIME_HOST)
+int64_t qjs_rust_epoch_time_milliseconds(void);
+uint64_t qjs_rust_random_seed(void);
+#endif
+#if defined(QJS_RUST_TIMEZONE_HOST)
+int32_t qjs_rust_timezone_offset_minutes(int64_t epoch_milliseconds);
+#endif
+
 #define OPTIMIZE         1
 #define SHORT_OPCODES    1
 #if defined(__EMSCRIPTEN__)
@@ -55,7 +66,9 @@
 #define DIRECT_DISPATCH  1
 #endif
 
-#if defined(__APPLE__)
+#if defined(QJS_RUST_ALLOCATOR)
+#define MALLOC_OVERHEAD QJS_RUST_ALLOCATOR_OVERHEAD
+#elif defined(__APPLE__)
 #define MALLOC_OVERHEAD  0
 #else
 #define MALLOC_OVERHEAD  8
@@ -66,9 +79,9 @@
 #define CONFIG_PRINTF_RNDN
 #endif
 
-/* define to include Atomics.* operations which depend on the OS
-   threads */
-#if !defined(__EMSCRIPTEN__)
+/* define to include the JavaScript shared-memory intrinsics which depend on
+   OS threads. SharedArrayBuffer is guarded separately when it is installed. */
+#if !defined(__EMSCRIPTEN__) && !defined(QJS_NO_JS_SHARED_MEMORY)
 #define CONFIG_ATOMICS
 #endif
 
@@ -1170,6 +1183,7 @@ static __exception int JS_ToArrayLengthFree(JSContext *ctx, uint32_t *plen,
 static JSValue JS_EvalObject(JSContext *ctx, JSValueConst this_obj,
                              JSValueConst val, int flags, int scope_idx);
 JSValue __attribute__((format(printf, 2, 3))) JS_ThrowInternalError(JSContext *ctx, const char *fmt, ...);
+#if !defined(QJS_NO_STDIO_DIAGNOSTICS)
 static __maybe_unused void JS_DumpAtoms(JSRuntime *rt);
 static __maybe_unused void JS_DumpString(JSRuntime *rt, const JSString *p);
 static __maybe_unused void JS_DumpObjectHeader(JSRuntime *rt);
@@ -1180,6 +1194,7 @@ static __maybe_unused void JS_DumpValueRT(JSRuntime *rt, const char *str, JSValu
 static __maybe_unused void JS_DumpValue(JSContext *ctx, const char *str, JSValueConst val);
 static __maybe_unused void JS_DumpShapes(JSRuntime *rt);
 static void js_dump_value_write(void *opaque, const char *buf, size_t len);
+#endif
 static JSValue js_function_apply(JSContext *ctx, JSValueConst this_val,
                                  int argc, JSValueConst *argv, int magic);
 static void js_array_finalizer(JSRuntime *rt, JSValue val);
@@ -1724,6 +1739,7 @@ static size_t __js_malloc_usable_size(JSMallocContext *s, const char *ptr)
     }
 }
 
+#if !defined(QJS_NO_STDIO_DIAGNOSTICS)
 static __maybe_unused void js_malloc_dump_arenas(JSMallocContext *s)
 {
     struct list_head *el;
@@ -1740,6 +1756,7 @@ static __maybe_unused void js_malloc_dump_arenas(JSMallocContext *s)
         }
     }
 }
+#endif
 
 #ifdef JS_MALLOC_USE_ITER
 typedef void JSMallocIterFunc(void *opaque, void *ptr);
@@ -2136,7 +2153,9 @@ void JS_SetRuntimeOpaque(JSRuntime *rt, void *opaque)
 /* default memory allocation functions with memory limitation */
 static size_t js_def_malloc_usable_size(const void *ptr)
 {
-#if defined(__APPLE__)
+#if defined(QJS_RUST_ALLOCATOR)
+    return qjs_rust_malloc_usable_size(ptr);
+#elif defined(__APPLE__)
     return malloc_size(ptr);
 #elif defined(_WIN32)
     return _msize((void *)ptr);
@@ -2229,6 +2248,11 @@ void JS_SetGCThreshold(JSRuntime *rt, size_t gc_threshold)
     rt->malloc_gc_threshold = gc_threshold;
 }
 
+#if defined(QJS_RUST_ALLOCATOR)
+#undef malloc
+#undef free
+#undef realloc
+#endif
 #define malloc(s) malloc_is_forbidden(s)
 #define free(p) free_is_forbidden(p)
 #define realloc(p,s) realloc_is_forbidden(p,s)
@@ -2978,6 +3002,7 @@ static uint32_t hash_string_rope(JSValueConst val, uint32_t h)
     }
 }
 
+#if !defined(QJS_NO_STDIO_DIAGNOSTICS)
 static __maybe_unused void JS_DumpChar(FILE *fo, int c, int sep)
 {
     if (c == sep || c == '\\') {
@@ -3044,6 +3069,7 @@ static __maybe_unused void JS_DumpAtoms(JSRuntime *rt)
     }
     printf("}\n");
 }
+#endif
 
 static int JS_ResizeAtomHash(JSRuntime *rt, int new_hash_size)
 {
@@ -5563,6 +5589,7 @@ static JSShape *find_hashed_shape_prop(JSRuntime *rt, JSShape *sh,
     return NULL;
 }
 
+#if !defined(QJS_NO_STDIO_DIAGNOSTICS)
 static __maybe_unused void JS_DumpShape(JSRuntime *rt, int i, JSShape *sh)
 {
     char atom_buf[ATOM_GET_STR_BUF_SIZE];
@@ -5607,6 +5634,7 @@ static __maybe_unused void JS_DumpShapes(JSRuntime *rt)
     }
     printf("}\n");
 }
+#endif
 
 /* 'props[]' is used to initialized the object properties. The number
    of elements depends on the shape. */
@@ -7221,6 +7249,7 @@ void JS_ComputeMemoryUsage(JSRuntime *rt, JSMemoryUsage *s)
         s->js_func_size + s->js_func_code_size + s->js_func_pc2line_size;
 }
 
+#if !defined(QJS_NO_STDIO_DIAGNOSTICS)
 void JS_DumpMemoryUsage(FILE *fp, const JSMemoryUsage *s, JSRuntime *rt)
 {
     fprintf(fp, "QuickJS memory usage -- " CONFIG_VERSION " version, %d-bit, malloc limit: %"PRId64"\n\n",
@@ -7345,6 +7374,7 @@ void JS_DumpMemoryUsage(FILE *fp, const JSMemoryUsage *s, JSRuntime *rt)
                 "binary objects", s->binary_object_count, s->binary_object_size);
     }
 }
+#endif
 
 JSValue JS_GetGlobalObject(JSContext *ctx)
 {
@@ -11635,6 +11665,7 @@ static JSBigInt *js_bigint_set_short(JSBigIntBuf *buf, JSValueConst val)
     return js_bigint_set_si(buf, JS_VALUE_GET_SHORT_BIG_INT(val));
 }
 
+#if !defined(QJS_NO_STDIO_DIAGNOSTICS)
 static __maybe_unused void js_bigint_dump1(JSContext *ctx, const char *str,
                                            const js_limb_t *tab, int len)
 {
@@ -11655,6 +11686,7 @@ static __maybe_unused void js_bigint_dump(JSContext *ctx, const char *str,
 {
     js_bigint_dump1(ctx, str, p->tab, p->len);
 }
+#endif
 
 static JSBigInt *js_bigint_new_si(JSContext *ctx, js_slimb_t a)
 {
@@ -14443,6 +14475,7 @@ void JS_PrintValue(JSContext *ctx, JSPrintValueWrite *write_func, void *write_op
     JS_PrintValueInternal(ctx->rt, ctx, write_func, write_opaque, val, options);
 }
 
+#if !defined(QJS_NO_STDIO_DIAGNOSTICS)
 static void js_dump_value_write(void *opaque, const char *buf, size_t len)
 {
     FILE *fo = opaque;
@@ -14550,6 +14583,7 @@ static __maybe_unused void JS_DumpGCObject(JSRuntime *rt, JSGCObjectHeader *p)
         printf("\n");
     }
 }
+#endif
 
 /* return -1 if exception (proxy case) or TRUE/FALSE */
 // TODO: should take flags to make proxy resolution and exceptions optional
@@ -22214,6 +22248,7 @@ static void free_token(JSParseState *s, JSToken *token)
     }
 }
 
+#if !defined(QJS_NO_STDIO_DIAGNOSTICS)
 static void __attribute((unused)) dump_token(JSParseState *s,
                                              const JSToken *token)
 {
@@ -22274,6 +22309,7 @@ static void __attribute((unused)) dump_token(JSParseState *s,
         break;
     }
 }
+#endif
 
 /* return the zero based line and column number in the source. */
 /* Note: we no longer support '\r' as line terminator */
@@ -47372,9 +47408,13 @@ static uint64_t xorshift64star(uint64_t *pstate)
 
 static void js_random_init(JSContext *ctx)
 {
+#if defined(QJS_RUST_TIME_HOST)
+    ctx->random_state = qjs_rust_random_seed();
+#else
     struct timeval tv;
     gettimeofday(&tv, NULL);
     ctx->random_state = ((int64_t)tv.tv_sec * 1000000) + tv.tv_usec;
+#endif
     /* the state must be non zero */
     if (ctx->random_state == 0)
         ctx->random_state = 1;
@@ -47453,6 +47493,9 @@ static const JSCFunctionListEntry js_math_obj[] = {
    between UTC time and local time 'd' in minutes */
 static int getTimezoneOffset(int64_t time)
 {
+#if defined(QJS_RUST_TIMEZONE_HOST)
+    return qjs_rust_timezone_offset_minutes(time);
+#else
     time_t ti;
     int res;
 
@@ -47503,6 +47546,7 @@ static int getTimezoneOffset(int64_t time)
     }
 #endif
     return res;
+#endif
 }
 
 #if 0
@@ -55395,9 +55439,13 @@ static JSValue get_date_string(JSContext *ctx, JSValueConst this_val,
 
 /* OS dependent: return the UTC time in ms since 1970. */
 static int64_t date_now(void) {
+#if defined(QJS_RUST_TIME_HOST)
+    return qjs_rust_epoch_time_milliseconds();
+#else
     struct timeval tv;
     gettimeofday(&tv, NULL);
     return (int64_t)tv.tv_sec * 1000 + (tv.tv_usec / 1000);
+#endif
 }
 
 static JSValue js_date_constructor(JSContext *ctx, JSValueConst new_target,
@@ -61043,6 +61091,7 @@ int JS_AddIntrinsicTypedArrays(JSContext *ctx)
         return -1;
     JS_FreeValue(ctx, obj);
 
+#if !defined(QJS_NO_JS_SHARED_MEMORY)
     obj = JS_NewCConstructor(ctx, JS_CLASS_SHARED_ARRAY_BUFFER, "SharedArrayBuffer",
                                     js_shared_array_buffer_constructor, 1, JS_CFUNC_constructor, 0,
                                     JS_UNDEFINED,
@@ -61052,6 +61101,7 @@ int JS_AddIntrinsicTypedArrays(JSContext *ctx)
     if (JS_IsException(obj))
         return -1;
     JS_FreeValue(ctx, obj);
+#endif
 
 
     typed_array_base_func =

@@ -25,7 +25,9 @@
 #ifndef QUICKJS_H
 #define QUICKJS_H
 
+#if !defined(QJS_NO_STDIO_DIAGNOSTICS)
 #include <stdio.h>
+#endif
 #include <stdint.h>
 #include <string.h>
 
@@ -445,7 +447,9 @@ typedef struct JSMemoryUsage {
 } JSMemoryUsage;
 
 void JS_ComputeMemoryUsage(JSRuntime *rt, JSMemoryUsage *s);
+#if !defined(QJS_NO_STDIO_DIAGNOSTICS)
 void JS_DumpMemoryUsage(FILE *fp, const JSMemoryUsage *s, JSRuntime *rt);
+#endif
 
 /* atom support */
 #define JS_ATOM_NULL 0

@@ -181,6 +181,7 @@ static void re_string_list_free(REStringList *s)
     cr_free(&s->cr);
 }
 
+#if !defined(QJS_NO_STDIO_DIAGNOSTICS)
 static void lre_print_char(int c, BOOL is_range)
 {
     if (c == '\'' || c == '\\' ||
@@ -223,6 +224,7 @@ static __maybe_unused void re_string_list_dump(const char *str, const REStringLi
         }
     }
 }
+#endif
 
 static int re_string_find2(REStringList *s, int len, const uint32_t *buf,
                            uint32_t h0, BOOL add_flag)
