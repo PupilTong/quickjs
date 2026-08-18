@@ -27,12 +27,10 @@
 #include <inttypes.h>
 #include <string.h>
 #include <assert.h>
-#include <ctype.h>
 #if !defined(QJS_RUST_TIME_HOST)
 #include <sys/time.h>
 #endif
 #include <math.h>
-#include <setjmp.h>
 
 #include "cutils.h"
 #include "dtoa.h"
@@ -200,6 +198,7 @@ static no_inline limb_t mp_div1norm(limb_t *tabr, const limb_t *taba, limb_t n,
     return r;
 }
 
+#if !defined(QJS_NO_STDIO_DIAGNOSTICS)
 static __maybe_unused void mpb_dump(const char *str, const mpb_t *a)
 {
     int i;
@@ -212,6 +211,7 @@ static __maybe_unused void mpb_dump(const char *str, const mpb_t *a)
     }
     printf("\n");
 }
+#endif
 
 static void mpb_renorm(mpb_t *r)
 {

@@ -34,13 +34,12 @@
 #if !defined(QJS_RUST_TIMEZONE_HOST)
 #include <time.h>
 #endif
-#include <fenv.h>
 #include <math.h>
-#if defined(__APPLE__)
+#if !defined(QJS_RUST_ALLOCATOR) && defined(__APPLE__)
 #include <malloc/malloc.h>
-#elif defined(__linux__) || defined(__GLIBC__)
+#elif !defined(QJS_RUST_ALLOCATOR) && (defined(__linux__) || defined(__GLIBC__))
 #include <malloc.h>
-#elif defined(__FreeBSD__)
+#elif !defined(QJS_RUST_ALLOCATOR) && defined(__FreeBSD__)
 #include <malloc_np.h>
 #endif
 
@@ -1184,6 +1183,7 @@ static __exception int JS_ToArrayLengthFree(JSContext *ctx, uint32_t *plen,
 static JSValue JS_EvalObject(JSContext *ctx, JSValueConst this_obj,
                              JSValueConst val, int flags, int scope_idx);
 JSValue __attribute__((format(printf, 2, 3))) JS_ThrowInternalError(JSContext *ctx, const char *fmt, ...);
+#if !defined(QJS_NO_STDIO_DIAGNOSTICS)
 static __maybe_unused void JS_DumpAtoms(JSRuntime *rt);
 static __maybe_unused void JS_DumpString(JSRuntime *rt, const JSString *p);
 static __maybe_unused void JS_DumpObjectHeader(JSRuntime *rt);
@@ -1194,6 +1194,7 @@ static __maybe_unused void JS_DumpValueRT(JSRuntime *rt, const char *str, JSValu
 static __maybe_unused void JS_DumpValue(JSContext *ctx, const char *str, JSValueConst val);
 static __maybe_unused void JS_DumpShapes(JSRuntime *rt);
 static void js_dump_value_write(void *opaque, const char *buf, size_t len);
+#endif
 static JSValue js_function_apply(JSContext *ctx, JSValueConst this_val,
                                  int argc, JSValueConst *argv, int magic);
 static void js_array_finalizer(JSRuntime *rt, JSValue val);
@@ -1738,6 +1739,7 @@ static size_t __js_malloc_usable_size(JSMallocContext *s, const char *ptr)
     }
 }
 
+#if !defined(QJS_NO_STDIO_DIAGNOSTICS)
 static __maybe_unused void js_malloc_dump_arenas(JSMallocContext *s)
 {
     struct list_head *el;
@@ -1754,6 +1756,7 @@ static __maybe_unused void js_malloc_dump_arenas(JSMallocContext *s)
         }
     }
 }
+#endif
 
 #ifdef JS_MALLOC_USE_ITER
 typedef void JSMallocIterFunc(void *opaque, void *ptr);
@@ -2999,6 +3002,7 @@ static uint32_t hash_string_rope(JSValueConst val, uint32_t h)
     }
 }
 
+#if !defined(QJS_NO_STDIO_DIAGNOSTICS)
 static __maybe_unused void JS_DumpChar(FILE *fo, int c, int sep)
 {
     if (c == sep || c == '\\') {
@@ -3065,6 +3069,7 @@ static __maybe_unused void JS_DumpAtoms(JSRuntime *rt)
     }
     printf("}\n");
 }
+#endif
 
 static int JS_ResizeAtomHash(JSRuntime *rt, int new_hash_size)
 {
@@ -5584,6 +5589,7 @@ static JSShape *find_hashed_shape_prop(JSRuntime *rt, JSShape *sh,
     return NULL;
 }
 
+#if !defined(QJS_NO_STDIO_DIAGNOSTICS)
 static __maybe_unused void JS_DumpShape(JSRuntime *rt, int i, JSShape *sh)
 {
     char atom_buf[ATOM_GET_STR_BUF_SIZE];
@@ -5628,6 +5634,7 @@ static __maybe_unused void JS_DumpShapes(JSRuntime *rt)
     }
     printf("}\n");
 }
+#endif
 
 /* 'props[]' is used to initialized the object properties. The number
    of elements depends on the shape. */
@@ -7242,6 +7249,7 @@ void JS_ComputeMemoryUsage(JSRuntime *rt, JSMemoryUsage *s)
         s->js_func_size + s->js_func_code_size + s->js_func_pc2line_size;
 }
 
+#if !defined(QJS_NO_STDIO_DIAGNOSTICS)
 void JS_DumpMemoryUsage(FILE *fp, const JSMemoryUsage *s, JSRuntime *rt)
 {
     fprintf(fp, "QuickJS memory usage -- " CONFIG_VERSION " version, %d-bit, malloc limit: %"PRId64"\n\n",
@@ -7366,6 +7374,7 @@ void JS_DumpMemoryUsage(FILE *fp, const JSMemoryUsage *s, JSRuntime *rt)
                 "binary objects", s->binary_object_count, s->binary_object_size);
     }
 }
+#endif
 
 JSValue JS_GetGlobalObject(JSContext *ctx)
 {
@@ -11656,6 +11665,7 @@ static JSBigInt *js_bigint_set_short(JSBigIntBuf *buf, JSValueConst val)
     return js_bigint_set_si(buf, JS_VALUE_GET_SHORT_BIG_INT(val));
 }
 
+#if !defined(QJS_NO_STDIO_DIAGNOSTICS)
 static __maybe_unused void js_bigint_dump1(JSContext *ctx, const char *str,
                                            const js_limb_t *tab, int len)
 {
@@ -11676,6 +11686,7 @@ static __maybe_unused void js_bigint_dump(JSContext *ctx, const char *str,
 {
     js_bigint_dump1(ctx, str, p->tab, p->len);
 }
+#endif
 
 static JSBigInt *js_bigint_new_si(JSContext *ctx, js_slimb_t a)
 {
@@ -14464,6 +14475,7 @@ void JS_PrintValue(JSContext *ctx, JSPrintValueWrite *write_func, void *write_op
     JS_PrintValueInternal(ctx->rt, ctx, write_func, write_opaque, val, options);
 }
 
+#if !defined(QJS_NO_STDIO_DIAGNOSTICS)
 static void js_dump_value_write(void *opaque, const char *buf, size_t len)
 {
     FILE *fo = opaque;
@@ -14571,6 +14583,7 @@ static __maybe_unused void JS_DumpGCObject(JSRuntime *rt, JSGCObjectHeader *p)
         printf("\n");
     }
 }
+#endif
 
 /* return -1 if exception (proxy case) or TRUE/FALSE */
 // TODO: should take flags to make proxy resolution and exceptions optional
@@ -22235,6 +22248,7 @@ static void free_token(JSParseState *s, JSToken *token)
     }
 }
 
+#if !defined(QJS_NO_STDIO_DIAGNOSTICS)
 static void __attribute((unused)) dump_token(JSParseState *s,
                                              const JSToken *token)
 {
@@ -22295,6 +22309,7 @@ static void __attribute((unused)) dump_token(JSParseState *s,
         break;
     }
 }
+#endif
 
 /* return the zero based line and column number in the source. */
 /* Note: we no longer support '\r' as line terminator */
