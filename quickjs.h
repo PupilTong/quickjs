@@ -347,6 +347,8 @@ static inline JSValue __JS_NewShortBigInt(JSContext *ctx, int64_t d)
 /* allow top-level await in normal script. JS_Eval() returns a
    promise. Only allowed with JS_EVAL_TYPE_GLOBAL */
 #define JS_EVAL_FLAG_ASYNC (1 << 7)
+/* Compile a module without loading its dependencies. Requires COMPILE_ONLY. */
+#define JS_EVAL_FLAG_COMPILE_UNLINKED (1 << 8)
 
 typedef JSValue JSCFunction(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 typedef JSValue JSCFunctionMagic(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, int magic);
@@ -1010,6 +1012,21 @@ JSAtom JS_GetScriptOrModuleName(JSContext *ctx, int n_stack_levels);
 /* only exported for os.Worker() */
 JSValue JS_LoadModule(JSContext *ctx, const char *basename,
                       const char *filename);
+
+/* An opt-in asynchronous loader may return NULL without an exception while
+   its host fetches a source. The deferrer retains the import continuation;
+   resume it on the context's owner thread after sources become available. */
+typedef int JSModuleLoadDeferrer(JSContext *ctx, const char *basename,
+                                const char *filename,
+                                JSValueConst *resolving_funcs,
+                                JSValueConst attributes, void *opaque);
+void JS_SetModuleLoadDeferrer(JSRuntime *rt, JSModuleLoadDeferrer *defer,
+                             void *opaque);
+void JS_ResumeModuleLoad(JSContext *ctx, const char *basename,
+                         const char *filename, JSValueConst *resolving_funcs,
+                         JSValueConst attributes);
+char *JS_DefaultModuleNormalizeName(JSContext *ctx, const char *base_name,
+                                    const char *name);
 
 /* C function definition */
 typedef enum JSCFunctionEnum {  /* XXX: should rename for namespace isolation */

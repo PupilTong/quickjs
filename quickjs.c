@@ -386,6 +386,8 @@ struct JSRuntime {
     } u;
     JSModuleCheckSupportedImportAttributes *module_check_attrs;
     void *module_loader_opaque;
+    JSModuleLoadDeferrer *module_load_deferrer;
+    void *module_load_deferrer_opaque;
     /* timestamp for internal use in module evaluation */
     int64_t module_async_evaluation_next_timestamp;
 
@@ -29971,7 +29973,7 @@ void JS_SetModuleLoaderFunc2(JSRuntime *rt,
 }
 
 /* default module filename normalizer */
-static char *js_default_module_normalize_name(JSContext *ctx,
+char *JS_DefaultModuleNormalizeName(JSContext *ctx,
                                               const char *base_name,
                                               const char *name)
 {
@@ -30056,7 +30058,7 @@ static JSModuleDef *js_host_resolve_imported_module(JSContext *ctx,
     JSAtom module_name;
 
     if (!rt->module_normalize_func) {
-        cname = js_default_module_normalize_name(ctx, base_cname, cname1);
+        cname = JS_DefaultModuleNormalizeName(ctx, base_cname, cname1);
     } else {
         cname = rt->module_normalize_func(ctx, base_cname, cname1,
                                           rt->module_loader_opaque);
@@ -31006,6 +31008,51 @@ static JSValue js_load_module_fulfilled(JSContext *ctx, JSValueConst this_val,
     return JS_UNDEFINED;
 }
 
+/* Fetch the complete graph without linking or evaluating any module. The
+   visited set is local to this attempt: a cycle through a still-loading root
+   must not leave a dependency incorrectly marked resolved on a later retry. */
+static JSModuleDef *js_prepare_module_graph(JSContext *ctx, const char *basename,
+                                           const char *filename,
+                                           JSValueConst attributes)
+{
+    JSResolveState visited = { 0 };
+    JSModuleDef *root, *m, *dependency;
+    int i, j;
+
+    root = js_host_resolve_imported_module(ctx, basename, filename, attributes);
+    if (!root)
+        return NULL;
+    if (add_resolve_entry(ctx, &visited, root, JS_ATOM_NULL) < 0)
+        return NULL;
+    for (i = 0; i < visited.count; i++) {
+        m = visited.array[i].module;
+        if (m->resolved)
+            continue;
+        for (j = 0; j < m->req_module_entries_count; j++) {
+            JSReqModuleEntry *request = &m->req_module_entries[j];
+            dependency = js_host_resolve_imported_module_atom(ctx, m->module_name,
+                                  request->module_name, request->attributes);
+            if (!dependency)
+                goto fail;
+            if (find_resolve_entry(&visited, dependency, JS_ATOM_NULL) < 0 &&
+                add_resolve_entry(ctx, &visited, dependency, JS_ATOM_NULL) < 0)
+                goto fail;
+        }
+    }
+    js_free(ctx, visited.array);
+    return root;
+ fail:
+    js_free(ctx, visited.array);
+    return NULL;
+}
+
+void JS_SetModuleLoadDeferrer(JSRuntime *rt, JSModuleLoadDeferrer *defer,
+                             void *opaque)
+{
+    rt->module_load_deferrer = defer;
+    rt->module_load_deferrer_opaque = opaque;
+}
+
 static void JS_LoadModuleInternal(JSContext *ctx, const char *basename,
                                   const char *filename,
                                   JSValueConst *resolving_funcs,
@@ -31016,12 +31063,23 @@ static void JS_LoadModuleInternal(JSContext *ctx, const char *basename,
     JSValue ret, err, func_obj, evaluate_resolving_funcs[2];
     JSValueConst func_data[3];
 
-    m = js_host_resolve_imported_module(ctx, basename, filename, attributes);
+    if (ctx->rt->module_load_deferrer) {
+        m = js_prepare_module_graph(ctx, basename, filename, attributes);
+        if (!m && !JS_HasException(ctx)) {
+            if (ctx->rt->module_load_deferrer(ctx, basename, filename,
+                    resolving_funcs, attributes,
+                    ctx->rt->module_load_deferrer_opaque) == 0)
+                return;
+        }
+    } else {
+        m = js_host_resolve_imported_module(ctx, basename, filename, attributes);
+    }
     if (!m)
         goto fail;
 
     if (js_resolve_module(ctx, m) < 0) {
-        js_free_modules(ctx, JS_FREE_MODULE_NOT_RESOLVED);
+        if (!ctx->rt->module_load_deferrer)
+            js_free_modules(ctx, JS_FREE_MODULE_NOT_RESOLVED);
         goto fail;
     }
 
@@ -31050,6 +31108,13 @@ static void JS_LoadModuleInternal(JSContext *ctx, const char *basename,
     JS_FreeValue(ctx, evaluate_resolving_funcs[0]);
     JS_FreeValue(ctx, evaluate_resolving_funcs[1]);
     JS_FreeValue(ctx, evaluate_promise);
+}
+
+void JS_ResumeModuleLoad(JSContext *ctx, const char *basename,
+                         const char *filename, JSValueConst *resolving_funcs,
+                         JSValueConst attributes)
+{
+    JS_LoadModuleInternal(ctx, basename, filename, resolving_funcs, attributes);
 }
 
 /* Return a promise or an exception in case of memory error. Used by
@@ -37319,7 +37384,8 @@ static JSValue __JS_EvalInternal(JSContext *ctx, JSValueConst this_obj,
     /* Could add a flag to avoid resolution if necessary */
     if (m) {
         m->func_obj = fun_obj;
-        if (js_resolve_module(ctx, m) < 0)
+        if (!(flags & JS_EVAL_FLAG_COMPILE_UNLINKED) &&
+            js_resolve_module(ctx, m) < 0)
             goto fail1;
         fun_obj = JS_NewModuleValue(ctx, m);
     }
