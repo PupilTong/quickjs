@@ -347,6 +347,9 @@ static inline JSValue __JS_NewShortBigInt(JSContext *ctx, int64_t d)
 /* allow top-level await in normal script. JS_Eval() returns a
    promise. Only allowed with JS_EVAL_TYPE_GLOBAL */
 #define JS_EVAL_FLAG_ASYNC (1 << 7)
+/* Compile a module without loading its dependencies. Implies COMPILE_ONLY:
+   the module is resolved later, by the import that links it. */
+#define JS_EVAL_FLAG_COMPILE_UNLINKED (1 << 8)
 
 typedef JSValue JSCFunction(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 typedef JSValue JSCFunctionMagic(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, int magic);
@@ -1010,6 +1013,27 @@ JSAtom JS_GetScriptOrModuleName(JSContext *ctx, int n_stack_levels);
 /* only exported for os.Worker() */
 JSValue JS_LoadModule(JSContext *ctx, const char *basename,
                       const char *filename);
+
+/* An opt-in asynchronous loader may return NULL without an exception while
+   its host fetches a source. The deferrer is then called with the import's
+   continuation. Every argument is borrowed for the duration of the call: to
+   defer, the host must JS_DupValue() resolving_funcs[0], resolving_funcs[1]
+   and attributes, copy basename and filename, return 0, and later pass the
+   copies to JS_ResumeModuleLoad() on the context's owner thread (freeing
+   them afterwards, or on context teardown). A nonzero return means the
+   import was not deferred; it should leave an exception pending, otherwise
+   the import rejects with a ReferenceError. */
+typedef int JSModuleLoadDeferrer(JSContext *ctx, const char *basename,
+                                const char *filename,
+                                JSValueConst *resolving_funcs,
+                                JSValueConst attributes, void *opaque);
+void JS_SetModuleLoadDeferrer(JSRuntime *rt, JSModuleLoadDeferrer *defer,
+                             void *opaque);
+void JS_ResumeModuleLoad(JSContext *ctx, const char *basename,
+                         const char *filename, JSValueConst *resolving_funcs,
+                         JSValueConst attributes);
+char *JS_DefaultModuleNormalizeName(JSContext *ctx, const char *base_name,
+                                    const char *name);
 
 /* C function definition */
 typedef enum JSCFunctionEnum {  /* XXX: should rename for namespace isolation */
