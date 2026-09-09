@@ -30559,11 +30559,19 @@ JSValue JS_GetModuleNamespace(JSContext *ctx, JSModuleDef *m)
     return JS_DupValue(ctx, m->module_ns);
 }
 
-/* Load all the required modules for module 'm' */
+/* Load all the required modules for module 'm'.
+
+   'resolved' means the whole subgraph below a module is loaded and its
+   'rme->module' edges are set, so it is written for the entire set reached
+   by one attempt only after that attempt succeeded: a cycle member that
+   finished early cannot be left marked while a sibling is still missing.
+   A failed attempt drops the edges it cached, because the unresolved
+   modules it loaded may be freed afterwards while a module the host still
+   holds would keep pointing at them. */
 static int js_resolve_module(JSContext *ctx, JSModuleDef *m)
 {
-    int i;
-    JSModuleDef *m1;
+    JSModuleDef **visited = NULL, *m1, *dependency;
+    int visited_size = 0, visited_count = 0, i, j, k, ret = -1;
 
     if (m->resolved)
         return 0;
@@ -30573,39 +30581,62 @@ static int js_resolve_module(JSContext *ctx, JSModuleDef *m)
         printf("resolving module '%s':\n", JS_AtomGetStr(ctx, buf1, sizeof(buf1), m->module_name));
     }
 #endif
-    /* set before the loop so a cycle terminates; cleared again on failure so
-       a module is never listed as resolved with a NULL dependency */
-    m->resolved = TRUE;
-    /* resolve each requested module */
-    for(i = 0; i < m->req_module_entries_count; i++) {
-        JSReqModuleEntry *rme = &m->req_module_entries[i];
-        m1 = rme->module;
-        if (!m1) {
-            m1 = js_host_resolve_imported_module_atom(ctx, m->module_name,
-                                                      rme->module_name,
-                                                      rme->attributes);
-            if (!m1) {
-                /* a deferring loader answers NULL without an exception
-                   while a source is pending; this path cannot wait */
-                if (!JS_HasException(ctx)) {
-                    char buf[ATOM_GET_STR_BUF_SIZE];
-                    JS_ThrowReferenceError(ctx, "could not load module '%s'",
-                                           JS_AtomGetStr(ctx, buf, sizeof(buf),
-                                                         rme->module_name));
+    if (js_resize_array(ctx, (void **)&visited, sizeof(visited[0]),
+                        &visited_size, 1))
+        return -1;
+    visited[visited_count++] = m;
+    for (i = 0; i < visited_count; i++) {
+        m1 = visited[i];
+        /* resolve each requested module */
+        for (j = 0; j < m1->req_module_entries_count; j++) {
+            JSReqModuleEntry *rme = &m1->req_module_entries[j];
+            dependency = rme->module;
+            if (!dependency) {
+                dependency = js_host_resolve_imported_module_atom(ctx,
+                                      m1->module_name, rme->module_name,
+                                      rme->attributes);
+                if (!dependency) {
+                    /* a deferring loader answers NULL without an exception
+                       while a source is pending; this path cannot wait */
+                    if (!JS_HasException(ctx)) {
+                        char buf[ATOM_GET_STR_BUF_SIZE];
+                        JS_ThrowReferenceError(ctx, "could not load module '%s'",
+                                               JS_AtomGetStr(ctx, buf, sizeof(buf),
+                                                             rme->module_name));
+                    }
+                    goto done;
                 }
-                goto fail;
+                rme->module = dependency;
             }
-            rme->module = m1;
+            /* already done in js_host_resolve_imported_module() except if
+               the module was loaded with JS_EvalBinary() */
+            if (dependency->resolved)
+                continue;
+            for (k = 0; k < visited_count; k++) {
+                if (visited[k] == dependency)
+                    break;
+            }
+            if (k < visited_count)
+                continue;
+            if (js_resize_array(ctx, (void **)&visited, sizeof(visited[0]),
+                                &visited_size, visited_count + 1))
+                goto done;
+            visited[visited_count++] = dependency;
         }
-        /* already done in js_host_resolve_imported_module() except if
-           the module was loaded with JS_EvalBinary() */
-        if (js_resolve_module(ctx, m1) < 0)
-            goto fail;
     }
-    return 0;
- fail:
-    m->resolved = FALSE;
-    return -1;
+    for (i = 0; i < visited_count; i++)
+        visited[i]->resolved = TRUE;
+    ret = 0;
+ done:
+    if (ret < 0) {
+        for (i = 0; i < visited_count; i++) {
+            m1 = visited[i];
+            for (j = 0; j < m1->req_module_entries_count; j++)
+                m1->req_module_entries[j].module = NULL;
+        }
+    }
+    js_free(ctx, visited);
+    return ret;
 }
 
 /* Create the <eval> function associated with the module */
