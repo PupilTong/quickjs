@@ -30989,6 +30989,20 @@ static int js_create_module_function(JSContext *ctx, JSModuleDef *m)
 }
 
 
+/* Store in a binding slot that linking fills a variable reference whose
+   reference count the caller has already taken. A link that fails sets
+   the modules left on its stack back to UNLINKED (js_link_module()), and
+   a later link of one of them fills its slots again: release what the
+   failed attempt left in the slot instead of overwriting it, or that
+   reference is never dropped. */
+static void js_set_module_var_ref(JSRuntime *rt, JSVarRef **pslot,
+                                  JSVarRef *var_ref)
+{
+    JSVarRef *old_var_ref = *pslot;
+    *pslot = var_ref;
+    free_var_ref(rt, old_var_ref);
+}
+
 /* Prepare a module to be executed by resolving all the imported
    variables. */
 static int js_inner_module_linking(JSContext *ctx, JSModuleDef *m,
@@ -31130,7 +31144,7 @@ static int js_inner_module_linking(JSContext *ctx, JSModuleDef *m,
                         goto fail;
                     }
                     set_value(ctx, &var_ref->value, val);
-                    var_refs[mi->var_idx] = var_ref;
+                    js_set_module_var_ref(ctx->rt, &var_refs[mi->var_idx], var_ref);
 #ifdef DUMP_MODULE_RESOLVE
                     printf("namespace from\n");
 #endif
@@ -31141,7 +31155,7 @@ static int js_inner_module_linking(JSContext *ctx, JSModuleDef *m,
                         var_ref = p1->u.func.var_refs[res_me->u.local.var_idx];
                     }
                     js_rc(var_ref)->ref_count++;
-                    var_refs[mi->var_idx] = var_ref;
+                    js_set_module_var_ref(ctx->rt, &var_refs[mi->var_idx], var_ref);
 #ifdef DUMP_MODULE_RESOLVE
                     printf("local export (var_ref=%p)\n", var_ref);
 #endif
@@ -31157,7 +31171,7 @@ static int js_inner_module_linking(JSContext *ctx, JSModuleDef *m,
             if (me->export_type == JS_EXPORT_TYPE_LOCAL) {
                 var_ref = var_refs[me->u.local.var_idx];
                 js_rc(var_ref)->ref_count++;
-                me->u.local.var_ref = var_ref;
+                js_set_module_var_ref(ctx->rt, &me->u.local.var_ref, var_ref);
             }
         }
 
