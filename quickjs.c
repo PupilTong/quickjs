@@ -36223,18 +36223,23 @@ static __exception int ss_check(JSContext *ctx, StackSizeState *s,
     return 0;
 }
 
-static __exception int compute_stack_size(JSContext *ctx,
-                                          JSFunctionDef *fd,
-                                          int *pstack_size)
+/* Also used by JS_ReadObject() with JS_READ_OBJ_VERIFY, so 'bc_buf' may
+   come from an untrusted writer: every read is checked against 'bc_len'. */
+static __exception int compute_stack_size_buf(JSContext *ctx,
+                                              const uint8_t *bc_buf,
+                                              int bc_len,
+                                              int *pstack_size)
 {
     StackSizeState s_s, *s = &s_s;
     int i, diff, n_pop, pos_next, stack_len, pos, op, catch_pos, catch_level;
     const JSOpCode *oi;
-    const uint8_t *bc_buf;
 
-    bc_buf = fd->byte_code.buf;
-    s->bc_len = fd->byte_code.size;
-    /* bc_len > 0 */
+    if (bc_len <= 0) {
+        JS_ThrowInternalError(ctx, "empty bytecode");
+        *pstack_size = 0;
+        return -1;
+    }
+    s->bc_len = bc_len;
     s->stack_level_tab = js_malloc(ctx, sizeof(s->stack_level_tab[0]) *
                                    s->bc_len);
     if (!s->stack_level_tab)
@@ -36422,6 +36427,14 @@ static __exception int compute_stack_size(JSContext *ctx,
     js_free(ctx, s->stack_level_tab);
     *pstack_size = 0;
     return -1;
+}
+
+static __exception int compute_stack_size(JSContext *ctx,
+                                          JSFunctionDef *fd,
+                                          int *pstack_size)
+{
+    return compute_stack_size_buf(ctx, fd->byte_code.buf, fd->byte_code.size,
+                                  pstack_size);
 }
 
 static int find_import_local(JSFunctionDef *fd, JSModuleDef *m, JSAtom name)
@@ -38878,6 +38891,11 @@ typedef struct BCReaderState {
     BOOL allow_bytecode : 8;
     BOOL is_rom_data : 8;
     BOOL allow_reference : 8;
+    BOOL verify : 8; /* JS_READ_OBJ_VERIFY */
+    /* with 'verify': what the next value read may be. Reset to
+       BC_CODE_NONE by every value read, so only the position the caller
+       set it for gets it. */
+    uint8_t code_allowed;
     /* object references */
     JSObject **objects;
     int objects_count;
@@ -38924,12 +38942,43 @@ static void __attribute__((format(printf, 2, 3))) bc_read_trace(BCReaderState *s
 #define bc_read_trace(...)
 #endif
 
+/* values of BCReaderState.code_allowed */
+enum {
+    BC_CODE_NONE,     /* neither a function nor a module */
+    BC_CODE_FUNCTION, /* a constant pool entry or a module's function */
+    BC_CODE_ANY,      /* the top level value */
+};
+
 static int bc_read_error_end(BCReaderState *s)
 {
     if (!s->error_state) {
         JS_ThrowSyntaxError(s->ctx, "read after the end of the buffer");
     }
     return s->error_state = -1;
+}
+
+static int bc_read_error_invalid(BCReaderState *s, const char *what)
+{
+    if (!s->error_state) {
+        JS_ThrowSyntaxError(s->ctx, "invalid %s (pos=%u)", what,
+                            (unsigned int)(s->ptr - s->buf_start));
+    }
+    return s->error_state = -1;
+}
+
+/* With 'verify': fail unless 'count' items of at least 'item_size' bytes
+   each can still follow, so that nothing is allocated for a count the
+   input cannot hold. 'count' is signed because the reader stores most
+   counts in an 'int'. */
+static int bc_verify_count(BCReaderState *s, int64_t count, uint32_t item_size)
+{
+    if (!s->verify)
+        return 0;
+    if (count < 0)
+        return bc_read_error_invalid(s, "count");
+    if ((uint64_t)count * item_size > (uint64_t)(s->buf_end - s->ptr))
+        return bc_read_error_end(s);
+    return 0;
 }
 
 static int bc_get_u8(BCReaderState *s, uint8_t *pval)
@@ -39020,6 +39069,10 @@ static int bc_get_leb128_u16(BCReaderState *s, uint16_t *pval)
         *pval = 0;
         return -1;
     }
+    if (s->verify && val > UINT16_MAX) {
+        *pval = 0;
+        return bc_read_error_invalid(s, "16-bit value");
+    }
     *pval = val;
     return 0;
 }
@@ -39085,6 +39138,8 @@ static JSString *JS_ReadString(BCReaderState *s)
         JS_ThrowInternalError(s->ctx, "string too long");
         return NULL;
     }
+    if (bc_verify_count(s, len, 1 << is_wide_char))
+        return NULL;
     p = js_alloc_string(s->ctx, len, is_wide_char);
     if (!p) {
         s->error_state = -1;
@@ -39149,6 +39204,19 @@ static int JS_ReadFunctionBytecode(BCReaderState *s, JSFunctionBytecode *b,
     pos = 0;
     while (pos < bc_len) {
         op = bc_buf[pos];
+        if (s->verify) {
+            /* the opcode table has no entry at or above OP_COUNT */
+            if (op == OP_invalid || op >= OP_COUNT) {
+                JS_ThrowSyntaxError(s->ctx, "invalid opcode (op=%d, pc=%d)",
+                                    op, pos);
+                goto verify_fail;
+            }
+            if (short_opcode_info(op).size > bc_len - pos) {
+                JS_ThrowSyntaxError(s->ctx, "truncated instruction (op=%d, pc=%d)",
+                                    op, pos);
+                goto verify_fail;
+            }
+        }
         len = short_opcode_info(op).size;
         switch(short_opcode_info(op).fmt) {
         case OP_FMT_atom:
@@ -39178,6 +39246,10 @@ static int JS_ReadFunctionBytecode(BCReaderState *s, JSFunctionBytecode *b,
         pos += len;
     }
     return 0;
+ verify_fail:
+    /* the atoms before 'pos' have been fixed up and are freed with 'b' */
+    b->byte_code_len = pos;
+    return s->error_state = -1;
 }
 
 static JSValue JS_ReadBigInt(BCReaderState *s)
@@ -39196,6 +39268,8 @@ static JSValue JS_ReadBigInt(BCReaderState *s)
         bc_read_trace(s, "}\n");
         return __JS_NewShortBigInt(s->ctx, 0);
     }
+    if (bc_verify_count(s, len, 1))
+        goto fail;
     p = js_bigint_new(s->ctx, (len - 1) / (JS_LIMB_BITS / 8) + 1);
     if (!p)
         goto fail;
@@ -39283,26 +39357,49 @@ static JSValue JS_ReadFunctionTag(BCReaderState *s)
     if (bc_get_u8(s, &v8))
         goto fail;
     bc.js_mode = v8;
-    if (bc_get_atom(s, &bc.func_name))  //@ atom leak if failure
+    if (bc_get_atom(s, &bc.func_name))
         goto fail;
     if (bc_get_leb128_u16(s, &bc.arg_count))
-        goto fail;
+        goto fail_name;
     if (bc_get_leb128_u16(s, &bc.var_count))
-        goto fail;
+        goto fail_name;
     if (bc_get_leb128_u16(s, &bc.defined_arg_count))
-        goto fail;
+        goto fail_name;
     if (bc_get_leb128_u16(s, &bc.stack_size))
-        goto fail;
+        goto fail_name;
     if (bc_get_leb128_u16(s, &bc.var_ref_count))
-        goto fail;
+        goto fail_name;
     if (bc_get_leb128_int(s, &bc.closure_var_count))
-        goto fail;
+        goto fail_name;
     if (bc_get_leb128_int(s, &bc.cpool_count))
-        goto fail;
+        goto fail_name;
     if (bc_get_leb128_int(s, &bc.byte_code_len))
-        goto fail;
+        goto fail_name;
     if (bc_get_leb128_int(s, &local_count))
-        goto fail;
+        goto fail_name;
+    if (s->verify) {
+        /* the stack size is computed from the bytecode below */
+        bc.stack_size = 0;
+        if (bc.byte_code_len <= 0) {
+            bc_read_error_invalid(s, "bytecode length");
+            goto fail_name;
+        }
+        /* the vardefs are indexed by argument and variable number */
+        if (local_count != 0 && local_count != bc.arg_count + bc.var_count) {
+            bc_read_error_invalid(s, "variable definition count");
+            goto fail_name;
+        }
+        /* smallest encodings: vardef 4 bytes, closure variable 4 bytes,
+           constant 1 byte, instruction 1 byte */
+        if (bc_verify_count(s, local_count, 4) ||
+            bc_verify_count(s, bc.closure_var_count, 4) ||
+            bc_verify_count(s, bc.cpool_count, 1) ||
+            bc_verify_count(s, bc.byte_code_len, 1) ||
+            bc_verify_count(s, (int64_t)local_count * 4 +
+                            (int64_t)bc.closure_var_count * 4 +
+                            bc.cpool_count + bc.byte_code_len, 1))
+            goto fail_name;
+    }
 
     if (bc.has_debug) {
         function_size = sizeof(*b);
@@ -39320,12 +39417,14 @@ static JSValue JS_ReadFunctionTag(BCReaderState *s)
         function_size += bc.byte_code_len;
     }
 
-    if (function_size > INT32_MAX)
-        return JS_ThrowOutOfMemory(ctx);
+    if (function_size > INT32_MAX) {
+        JS_ThrowOutOfMemory(ctx);
+        goto fail_name;
+    }
 
     b = js_mallocz(ctx, function_size);
     if (!b)
-        return JS_EXCEPTION;
+        goto fail_name;
 
     memcpy(b, &bc, offsetof(JSFunctionBytecode, debug));
     if (local_count != 0) {
@@ -39406,6 +39505,15 @@ static JSValue JS_ReadFunctionTag(BCReaderState *s)
             goto fail;
         bc_read_trace(s, "}\n");
     }
+    if (s->verify) {
+        int stack_size;
+        if (compute_stack_size_buf(ctx, b->byte_code_buf, b->byte_code_len,
+                                   &stack_size)) {
+            s->error_state = -1;
+            goto fail;
+        }
+        b->stack_size = stack_size;
+    }
     if (b->has_debug) {
         /* read optional debug information */
         bc_read_trace(s, "debug {\n");
@@ -39416,6 +39524,8 @@ static JSValue JS_ReadFunctionTag(BCReaderState *s)
 #endif
         if (bc_get_leb128_int(s, &b->debug.pc2line_len))
             goto fail;
+        if (bc_verify_count(s, b->debug.pc2line_len, 1))
+            goto fail;
         if (b->debug.pc2line_len) {
             b->debug.pc2line_buf = js_mallocz(ctx, b->debug.pc2line_len);
             if (!b->debug.pc2line_buf)
@@ -39424,6 +39534,8 @@ static JSValue JS_ReadFunctionTag(BCReaderState *s)
                 goto fail;
         }
         if (bc_get_leb128_int(s, &b->debug.source_len))
+            goto fail;
+        if (bc_verify_count(s, b->debug.source_len, 1))
             goto fail;
         if (b->debug.source_len) {
             bc_read_trace(s, "source: %d bytes\n", b->source_len);
@@ -39439,6 +39551,7 @@ static JSValue JS_ReadFunctionTag(BCReaderState *s)
         bc_read_trace(s, "cpool {\n");
         for(i = 0; i < b->cpool_count; i++) {
             JSValue val;
+            s->code_allowed = BC_CODE_FUNCTION;
             val = JS_ReadObjectRec(s);
             if (JS_IsException(val))
                 goto fail;
@@ -39448,9 +39561,48 @@ static JSValue JS_ReadFunctionTag(BCReaderState *s)
     }
     b->realm = JS_DupContext(ctx);
     return obj;
+ fail_name:
+    /* 'b' was not allocated: the name is the only thing read so far */
+    JS_FreeAtom(ctx, bc.func_name);
+    return JS_EXCEPTION;
  fail:
     JS_FreeValue(ctx, obj);
     return JS_EXCEPTION;
+}
+
+/* With JS_READ_OBJ_VERIFY: the indices a module record holds are inside
+   the tables they index, and its function is function bytecode. */
+static int js_module_verify_indices(BCReaderState *s, JSModuleDef *m)
+{
+    JSFunctionBytecode *b;
+    int i;
+
+    if (JS_VALUE_GET_TAG(m->func_obj) != JS_TAG_FUNCTION_BYTECODE)
+        return bc_read_error_invalid(s, "module function");
+    b = JS_VALUE_GET_PTR(m->func_obj);
+    for(i = 0; i < m->export_entries_count; i++) {
+        JSExportEntry *me = &m->export_entries[i];
+        if (me->export_type == JS_EXPORT_TYPE_LOCAL) {
+            if ((unsigned)me->u.local.var_idx >= b->closure_var_count)
+                return bc_read_error_invalid(s, "export variable index");
+        } else {
+            if ((unsigned)me->u.req_module_idx >= m->req_module_entries_count)
+                return bc_read_error_invalid(s, "export module index");
+        }
+    }
+    for(i = 0; i < m->star_export_entries_count; i++) {
+        if ((unsigned)m->star_export_entries[i].req_module_idx >=
+            m->req_module_entries_count)
+            return bc_read_error_invalid(s, "star export module index");
+    }
+    for(i = 0; i < m->import_entries_count; i++) {
+        JSImportEntry *mi = &m->import_entries[i];
+        if ((unsigned)mi->var_idx >= b->closure_var_count)
+            return bc_read_error_invalid(s, "import variable index");
+        if ((unsigned)mi->req_module_idx >= m->req_module_entries_count)
+            return bc_read_error_invalid(s, "import module index");
+    }
+    return 0;
 }
 
 static JSValue JS_ReadModule(BCReaderState *s)
@@ -39459,7 +39611,7 @@ static JSValue JS_ReadModule(BCReaderState *s)
     JSValue obj;
     JSModuleDef *m = NULL;
     JSAtom module_name;
-    int i;
+    int i, count;
     uint8_t v8;
 
     if (bc_get_atom(s, &module_name))
@@ -39471,8 +39623,12 @@ static JSValue JS_ReadModule(BCReaderState *s)
     if (!m)
         goto fail;
     obj = JS_NewModuleValue(ctx, m);
-    if (bc_get_leb128_int(s, &m->req_module_entries_count))
+    /* Each count is checked before it is stored: the error thrown for it
+       allocates, which may run the GC, which walks the module's entries.
+       Module name and attributes: 2 bytes. */
+    if (bc_get_leb128_int(s, &count) || bc_verify_count(s, count, 2))
         goto fail;
+    m->req_module_entries_count = count;
     if (m->req_module_entries_count != 0) {
         m->req_module_entries_size = m->req_module_entries_count;
         m->req_module_entries = js_mallocz(ctx, sizeof(m->req_module_entries[0]) * m->req_module_entries_size);
@@ -39490,8 +39646,10 @@ static JSValue JS_ReadModule(BCReaderState *s)
         }
     }
 
-    if (bc_get_leb128_int(s, &m->export_entries_count))
+    /* type, index or module and name, export name: 3 bytes */
+    if (bc_get_leb128_int(s, &count) || bc_verify_count(s, count, 3))
         goto fail;
+    m->export_entries_count = count;
     if (m->export_entries_count != 0) {
         m->export_entries_size = m->export_entries_count;
         m->export_entries = js_mallocz(ctx, sizeof(m->export_entries[0]) * m->export_entries_size);
@@ -39502,6 +39660,11 @@ static JSValue JS_ReadModule(BCReaderState *s)
             if (bc_get_u8(s, &v8))
                 goto fail;
             me->export_type = v8;
+            if (s->verify && v8 != JS_EXPORT_TYPE_LOCAL &&
+                v8 != JS_EXPORT_TYPE_INDIRECT) {
+                bc_read_error_invalid(s, "export type");
+                goto fail;
+            }
             if (me->export_type == JS_EXPORT_TYPE_LOCAL) {
                 if (bc_get_leb128_int(s, &me->u.local.var_idx))
                     goto fail;
@@ -39516,8 +39679,9 @@ static JSValue JS_ReadModule(BCReaderState *s)
         }
     }
 
-    if (bc_get_leb128_int(s, &m->star_export_entries_count))
+    if (bc_get_leb128_int(s, &count) || bc_verify_count(s, count, 1))
         goto fail;
+    m->star_export_entries_count = count;
     if (m->star_export_entries_count != 0) {
         m->star_export_entries_size = m->star_export_entries_count;
         m->star_export_entries = js_mallocz(ctx, sizeof(m->star_export_entries[0]) * m->star_export_entries_size);
@@ -39530,8 +39694,10 @@ static JSValue JS_ReadModule(BCReaderState *s)
         }
     }
 
-    if (bc_get_leb128_int(s, &m->import_entries_count))
+    /* index, star flag, name, module: 4 bytes */
+    if (bc_get_leb128_int(s, &count) || bc_verify_count(s, count, 4))
         goto fail;
+    m->import_entries_count = count;
     if (m->import_entries_count != 0) {
         m->import_entries_size = m->import_entries_count;
         m->import_entries = js_mallocz(ctx, sizeof(m->import_entries[0]) * m->import_entries_size);
@@ -39556,8 +39722,11 @@ static JSValue JS_ReadModule(BCReaderState *s)
         goto fail;
     m->has_tla = (v8 != 0);
 
+    s->code_allowed = BC_CODE_FUNCTION;
     m->func_obj = JS_ReadObjectRec(s);
     if (JS_IsException(m->func_obj))
+        goto fail;
+    if (s->verify && js_module_verify_indices(s, m))
         goto fail;
     return obj;
  fail:
@@ -39828,14 +39997,46 @@ static JSValue JS_ReadObjectValue(BCReaderState *s)
 static JSValue JS_ReadObjectRec(BCReaderState *s)
 {
     JSContext *ctx = s->ctx;
-    uint8_t tag;
+    uint8_t tag, code_allowed;
     JSValue obj = JS_UNDEFINED;
+
+    code_allowed = s->code_allowed;
+    s->code_allowed = BC_CODE_NONE;
 
     if (js_check_stack_overflow(ctx->rt, 0))
         return JS_ThrowStackOverflow(ctx);
 
     if (bc_get_u8(s, &tag))
         return JS_EXCEPTION;
+
+    if (s->verify) {
+        /* only the value kinds compiled code contains, functions only
+           where a function is read, and a module only at the top level */
+        switch(tag) {
+        case BC_TAG_NULL:
+        case BC_TAG_UNDEFINED:
+        case BC_TAG_BOOL_FALSE:
+        case BC_TAG_BOOL_TRUE:
+        case BC_TAG_INT32:
+        case BC_TAG_FLOAT64:
+        case BC_TAG_STRING:
+        case BC_TAG_OBJECT:
+        case BC_TAG_ARRAY:
+        case BC_TAG_BIG_INT:
+        case BC_TAG_TEMPLATE_OBJECT:
+            break;
+        case BC_TAG_FUNCTION_BYTECODE:
+            if (code_allowed == BC_CODE_NONE)
+                goto invalid_tag;
+            break;
+        case BC_TAG_MODULE:
+            if (code_allowed != BC_CODE_ANY)
+                goto invalid_tag;
+            break;
+        default:
+            goto invalid_tag;
+        }
+    }
 
     bc_read_trace(s, "%s {\n", bc_tag_str[tag]);
 
@@ -39954,6 +40155,11 @@ static int JS_ReadObjectAtoms(BCReaderState *s)
     }
     if (bc_get_leb128(s, &s->idx_to_atom_count))
         return -1;
+    /* each atom is a string of at least 1 byte */
+    if (bc_verify_count(s, s->idx_to_atom_count, 1)) {
+        s->idx_to_atom_count = 0;
+        return -1;
+    }
 
     bc_read_trace(s, "%d atom indexes {\n", s->idx_to_atom_count);
 
@@ -40008,6 +40214,11 @@ JSValue JS_ReadObject(JSContext *ctx, const uint8_t *buf, size_t buf_len,
     s->is_rom_data = ((flags & JS_READ_OBJ_ROM_DATA) != 0);
     s->allow_sab = ((flags & JS_READ_OBJ_SAB) != 0);
     s->allow_reference = ((flags & JS_READ_OBJ_REFERENCE) != 0);
+    s->verify = ((flags & JS_READ_OBJ_VERIFY) != 0);
+    if (s->verify) {
+        /* ROM data trusts the atom indices in the instruction stream */
+        s->is_rom_data = FALSE;
+    }
     if (s->allow_bytecode)
         s->first_atom = JS_ATOM_END;
     else
@@ -40015,6 +40226,7 @@ JSValue JS_ReadObject(JSContext *ctx, const uint8_t *buf, size_t buf_len,
     if (JS_ReadObjectAtoms(s)) {
         obj = JS_EXCEPTION;
     } else {
+        s->code_allowed = BC_CODE_ANY;
         obj = JS_ReadObjectRec(s);
     }
     bc_reader_free(s);

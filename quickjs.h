@@ -1035,6 +1035,19 @@ uint8_t *JS_WriteObject2(JSContext *ctx, size_t *psize, JSValueConst obj,
 #define JS_READ_OBJ_ROM_DATA  (1 << 1) /* avoid duplicating 'buf' data */
 #define JS_READ_OBJ_SAB       (1 << 2) /* allow SharedArrayBuffer */
 #define JS_READ_OBJ_REFERENCE (1 << 3) /* allow object references */
+/* The input may come from an untrusted writer. The reader checks every
+   count, length and index it uses against the input before using it,
+   accepts only the value kinds compiled code contains, decodes each
+   function's instruction stream with bounds checks, and computes each
+   function's stack size from its bytecode, ignoring the stored one. A
+   function whose stack depth cannot be computed (invalid opcode,
+   truncated instruction, jump outside the function, stack underflow,
+   inconsistent depth where paths merge) fails the read. It does not
+   check instruction operands (local, argument, closure and constant
+   indices) nor how values flow between instructions, so it does not by
+   itself make bytecode from an untrusted writer safe to run.
+   JS_READ_OBJ_ROM_DATA is ignored with this flag. */
+#define JS_READ_OBJ_VERIFY    (1 << 4)
 JSValue JS_ReadObject(JSContext *ctx, const uint8_t *buf, size_t buf_len,
                       int flags);
 /* instantiate and evaluate a bytecode function. Only used when
