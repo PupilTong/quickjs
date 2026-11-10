@@ -39815,7 +39815,11 @@ static JSValue JS_ReadArray(BCReaderState *s, int tag)
             if (ret < 0)
                 goto fail;
         }
-        JS_PreventExtensions(ctx, obj);
+        /* same state as js_parse_template(): frozen. The 'raw' array
+           is itself written as a template object, so it is sealed here
+           too. */
+        if (seal_template_obj(ctx, obj))
+            goto fail;
     }
     return obj;
  fail:
