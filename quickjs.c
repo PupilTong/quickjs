@@ -49860,6 +49860,29 @@ static JSValue js_compile_regexp(JSContext *ctx, JSValueConst pattern,
     return ret;
 }
 
+uint8_t *JS_CompileRegExp(JSContext *ctx, size_t *psize,
+                          JSValueConst pattern, JSValueConst flags)
+{
+    JSValue bc;
+    JSString *p;
+    uint8_t *buf;
+
+    *psize = 0;
+    bc = js_compile_regexp(ctx, pattern, flags);
+    if (JS_IsException(bc))
+        return NULL;
+    /* the bytecode string is 8 bit and never empty */
+    p = JS_VALUE_GET_STRING(bc);
+    assert(JS_VALUE_GET_TAG(bc) == JS_TAG_STRING && !p->is_wide_char);
+    buf = js_malloc(ctx, p->len);
+    if (buf) {
+        memcpy(buf, p->u.str8, p->len);
+        *psize = p->len;
+    }
+    JS_FreeValue(ctx, bc);
+    return buf;
+}
+
 /* fast regexp creation */
 static JSValue JS_NewRegexp(JSContext *ctx, JSValue pattern, JSValue bc)
 {

@@ -1050,6 +1050,14 @@ uint8_t *JS_WriteObject2(JSContext *ctx, size_t *psize, JSValueConst obj,
 #define JS_READ_OBJ_VERIFY    (1 << 4)
 JSValue JS_ReadObject(JSContext *ctx, const uint8_t *buf, size_t buf_len,
                       int flags);
+/* Compile the regular expression 'pattern' with 'flags' (a string of
+   RegExp flag letters, or JS_UNDEFINED for none) to the bytecode a
+   RegExp object and a regular expression literal with the same pattern
+   and flags carry. Returns '*psize' bytes allocated with js_malloc(), or
+   NULL with a pending exception: a SyntaxError for an invalid pattern
+   or invalid flags. */
+uint8_t *JS_CompileRegExp(JSContext *ctx, size_t *psize,
+                          JSValueConst pattern, JSValueConst flags);
 /* instantiate and evaluate a bytecode function. Only used when
    reading a script or module with JS_ReadObject() */
 JSValue JS_EvalFunction(JSContext *ctx, JSValue fun_obj);
