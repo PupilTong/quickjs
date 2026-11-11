@@ -39562,6 +39562,12 @@ static JSValue JS_ReadModule(BCReaderState *s)
     return obj;
  fail:
     if (m) {
+        /* 'm' holds two references: the one js_new_module_def() gave
+           it, owned by ctx->loaded_modules, and 'obj'. Release both so
+           that a module that could not be read is freed and unlinked
+           instead of staying registered under its name, where a later
+           import of that name would resolve to it. */
+        JS_FreeValue(ctx, obj);
         JS_FreeValue(ctx, JS_MKPTR(JS_TAG_MODULE, m));
     }
     return JS_EXCEPTION;
