@@ -36223,17 +36223,17 @@ static __exception int ss_check(JSContext *ctx, StackSizeState *s,
     return 0;
 }
 
-static __exception int compute_stack_size(JSContext *ctx,
-                                          JSFunctionDef *fd,
-                                          int *pstack_size)
+/* Also used by JS_ReadObject() with JS_READ_OBJ_COMPUTE_STACK_SIZE. */
+static __exception int compute_stack_size_buf(JSContext *ctx,
+                                              const uint8_t *bc_buf,
+                                              int bc_len,
+                                              int *pstack_size)
 {
     StackSizeState s_s, *s = &s_s;
     int i, diff, n_pop, pos_next, stack_len, pos, op, catch_pos, catch_level;
     const JSOpCode *oi;
-    const uint8_t *bc_buf;
 
-    bc_buf = fd->byte_code.buf;
-    s->bc_len = fd->byte_code.size;
+    s->bc_len = bc_len;
     /* bc_len > 0 */
     s->stack_level_tab = js_malloc(ctx, sizeof(s->stack_level_tab[0]) *
                                    s->bc_len);
@@ -36422,6 +36422,14 @@ static __exception int compute_stack_size(JSContext *ctx,
     js_free(ctx, s->stack_level_tab);
     *pstack_size = 0;
     return -1;
+}
+
+static __exception int compute_stack_size(JSContext *ctx,
+                                          JSFunctionDef *fd,
+                                          int *pstack_size)
+{
+    return compute_stack_size_buf(ctx, fd->byte_code.buf, fd->byte_code.size,
+                                  pstack_size);
 }
 
 static int find_import_local(JSFunctionDef *fd, JSModuleDef *m, JSAtom name)
@@ -38878,6 +38886,7 @@ typedef struct BCReaderState {
     BOOL allow_bytecode : 8;
     BOOL is_rom_data : 8;
     BOOL allow_reference : 8;
+    BOOL compute_stack_size : 8; /* JS_READ_OBJ_COMPUTE_STACK_SIZE */
     /* object references */
     JSObject **objects;
     int objects_count;
@@ -39283,7 +39292,7 @@ static JSValue JS_ReadFunctionTag(BCReaderState *s)
     if (bc_get_u8(s, &v8))
         goto fail;
     bc.js_mode = v8;
-    if (bc_get_atom(s, &bc.func_name))  //@ atom leak if failure
+    if (bc_get_atom(s, &bc.func_name))
         goto fail;
     if (bc_get_leb128_u16(s, &bc.arg_count))
         goto fail;
@@ -39320,12 +39329,14 @@ static JSValue JS_ReadFunctionTag(BCReaderState *s)
         function_size += bc.byte_code_len;
     }
 
-    if (function_size > INT32_MAX)
-        return JS_ThrowOutOfMemory(ctx);
+    if (function_size > INT32_MAX) {
+        JS_ThrowOutOfMemory(ctx);
+        goto fail;
+    }
 
     b = js_mallocz(ctx, function_size);
     if (!b)
-        return JS_EXCEPTION;
+        goto fail;
 
     memcpy(b, &bc, offsetof(JSFunctionBytecode, debug));
     if (local_count != 0) {
@@ -39406,6 +39417,13 @@ static JSValue JS_ReadFunctionTag(BCReaderState *s)
             goto fail;
         bc_read_trace(s, "}\n");
     }
+    if (s->compute_stack_size) {
+        int stack_size;
+        if (compute_stack_size_buf(ctx, b->byte_code_buf, b->byte_code_len,
+                                   &stack_size))
+            goto fail;
+        b->stack_size = stack_size;
+    }
     if (b->has_debug) {
         /* read optional debug information */
         bc_read_trace(s, "debug {\n");
@@ -39449,6 +39467,10 @@ static JSValue JS_ReadFunctionTag(BCReaderState *s)
     b->realm = JS_DupContext(ctx);
     return obj;
  fail:
+    if (JS_IsUndefined(obj)) {
+        /* 'b' was not allocated: the name is all there is to free */
+        JS_FreeAtom(ctx, bc.func_name);
+    }
     JS_FreeValue(ctx, obj);
     return JS_EXCEPTION;
 }
@@ -39646,7 +39668,11 @@ static JSValue JS_ReadArray(BCReaderState *s, int tag)
             if (ret < 0)
                 goto fail;
         }
-        JS_PreventExtensions(ctx, obj);
+        /* same state as js_parse_template(): frozen. The 'raw' array
+           is itself written as a template object, so it is sealed here
+           too. */
+        if (seal_template_obj(ctx, obj))
+            goto fail;
     }
     return obj;
  fail:
@@ -40008,6 +40034,7 @@ JSValue JS_ReadObject(JSContext *ctx, const uint8_t *buf, size_t buf_len,
     s->is_rom_data = ((flags & JS_READ_OBJ_ROM_DATA) != 0);
     s->allow_sab = ((flags & JS_READ_OBJ_SAB) != 0);
     s->allow_reference = ((flags & JS_READ_OBJ_REFERENCE) != 0);
+    s->compute_stack_size = ((flags & JS_READ_OBJ_COMPUTE_STACK_SIZE) != 0);
     if (s->allow_bytecode)
         s->first_atom = JS_ATOM_END;
     else
@@ -49646,6 +49673,29 @@ static JSValue js_compile_regexp(JSContext *ctx, JSValueConst pattern,
     ret = js_new_string8_len(ctx, (const char *)re_bytecode_buf, re_bytecode_len);
     js_free(ctx, re_bytecode_buf);
     return ret;
+}
+
+uint8_t *JS_CompileRegExp(JSContext *ctx, size_t *psize,
+                          JSValueConst pattern, JSValueConst flags)
+{
+    JSValue bc;
+    JSString *p;
+    uint8_t *buf;
+
+    *psize = 0;
+    bc = js_compile_regexp(ctx, pattern, flags);
+    if (JS_IsException(bc))
+        return NULL;
+    /* the bytecode string is 8 bit and never empty */
+    p = JS_VALUE_GET_STRING(bc);
+    assert(JS_VALUE_GET_TAG(bc) == JS_TAG_STRING && !p->is_wide_char);
+    buf = js_malloc(ctx, p->len);
+    if (buf) {
+        memcpy(buf, p->u.str8, p->len);
+        *psize = p->len;
+    }
+    JS_FreeValue(ctx, bc);
+    return buf;
 }
 
 /* fast regexp creation */

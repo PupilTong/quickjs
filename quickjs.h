@@ -1035,8 +1035,26 @@ uint8_t *JS_WriteObject2(JSContext *ctx, size_t *psize, JSValueConst obj,
 #define JS_READ_OBJ_ROM_DATA  (1 << 1) /* avoid duplicating 'buf' data */
 #define JS_READ_OBJ_SAB       (1 << 2) /* allow SharedArrayBuffer */
 #define JS_READ_OBJ_REFERENCE (1 << 3) /* allow object references */
+/* Compute each function's stack size from its bytecode, with the
+   compiler's own computation, and ignore the stored one. A function whose
+   stack size the computation refuses (invalid opcode, truncated
+   instruction, jump outside the function, stack underflow or overflow,
+   inconsistent depth or catch position where paths merge) fails the
+   read. Nothing else is checked: the reader trusts the structure of its
+   input (counts, lengths, indices, value kinds, the instruction stream)
+   as it does without this flag. Pass it only bytes this engine wrote, or
+   bytes from a writer that guarantees this engine's format. */
+#define JS_READ_OBJ_COMPUTE_STACK_SIZE (1 << 4)
 JSValue JS_ReadObject(JSContext *ctx, const uint8_t *buf, size_t buf_len,
                       int flags);
+/* Compile the regular expression 'pattern' with 'flags' (a string of
+   RegExp flag letters, or JS_UNDEFINED for none) to the bytecode a
+   RegExp object and a regular expression literal with the same pattern
+   and flags carry. Returns '*psize' bytes allocated with js_malloc(), or
+   NULL with a pending exception: a SyntaxError for an invalid pattern
+   or invalid flags. */
+uint8_t *JS_CompileRegExp(JSContext *ctx, size_t *psize,
+                          JSValueConst pattern, JSValueConst flags);
 /* instantiate and evaluate a bytecode function. Only used when
    reading a script or module with JS_ReadObject() */
 JSValue JS_EvalFunction(JSContext *ctx, JSValue fun_obj);
