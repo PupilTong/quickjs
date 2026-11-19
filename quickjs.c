@@ -1024,6 +1024,8 @@ struct JSObject {
     uint8_t has_immutable_prototype : 1; /* cannot modify the prototype */
     uint8_t tmp_mark : 1; /* used in JS_WriteObjectRec() */
     uint8_t is_HTMLDDA : 1; /* specific annex B IsHtmlDDA behavior */
+    uint8_t is_uncloneable : 1; /* JS_WriteObject() writes it only as a transfer slot */
+    uint8_t is_transferable : 1; /* may be in a JS_WriteObjectTransfer() list */
     uint16_t class_id; /* see JS_CLASS_x */
     /* count the number of weak references to this object. The object
        structure is freed only if header.ref_count = 0 and
@@ -5751,6 +5753,8 @@ static JSValue JS_NewObjectFromShape(JSContext *ctx, JSShape *sh, JSClassID clas
     p->has_immutable_prototype = 0;
     p->tmp_mark = 0;
     p->is_HTMLDDA = 0;
+    p->is_uncloneable = 0;
+    p->is_transferable = 0;
     p->weakref_count = 0;
     p->u.opaque = NULL;
     p->shape = sh;
@@ -11274,6 +11278,16 @@ void JS_SetIsHTMLDDA(JSContext *ctx, JSValueConst obj)
         return;
     p = JS_VALUE_GET_OBJ(obj);
     p->is_HTMLDDA = TRUE;
+}
+
+void JS_SetUncloneable(JSContext *ctx, JSValueConst obj, JS_BOOL transferable)
+{
+    JSObject *p;
+    if (JS_VALUE_GET_TAG(obj) != JS_TAG_OBJECT)
+        return;
+    p = JS_VALUE_GET_OBJ(obj);
+    p->is_uncloneable = TRUE;
+    p->is_transferable = (transferable != 0);
 }
 
 static inline BOOL JS_IsHTMLDDA(JSContext *ctx, JSValueConst obj)
@@ -38018,6 +38032,7 @@ typedef enum BCTagEnum {
     BC_TAG_DATE,
     BC_TAG_OBJECT_VALUE,
     BC_TAG_OBJECT_REFERENCE,
+    BC_TAG_TRANSFER,
 } BCTagEnum;
 
 #define BC_VERSION 5
@@ -38039,6 +38054,9 @@ typedef struct BCWriterState {
     int sab_tab_size;
     /* list of referenced objects (used if allow_reference = TRUE) */
     JSObjectList object_list;
+    /* objects written as BC_TAG_TRANSFER and their index in this list */
+    JSValueConst *transfer;
+    int transfer_len;
 } BCWriterState;
 
 #ifdef DUMP_READ_OBJECT
@@ -38063,6 +38081,7 @@ static const char * const bc_tag_str[] = {
     "Date",
     "ObjectValue",
     "ObjectReference",
+    "Transfer",
 };
 #endif
 
@@ -38716,6 +38735,19 @@ static int JS_WriteObjectRec(BCWriterState *s, JSValueConst obj)
             JSObject *p = JS_VALUE_GET_OBJ(obj);
             int ret, idx;
 
+            if (unlikely(p->is_uncloneable)) {
+                for (idx = 0; idx < s->transfer_len; idx++) {
+                    if (JS_VALUE_GET_OBJ(s->transfer[idx]) == p)
+                        break;
+                }
+                if (idx == s->transfer_len) {
+                    JS_ThrowTypeError(s->ctx, "uncloneable object");
+                    goto fail;
+                }
+                bc_put_u8(s, BC_TAG_TRANSFER);
+                bc_put_leb128(s, idx);
+                break;
+            }
             if (s->allow_reference) {
                 idx = js_object_list_find(s->ctx, &s->object_list, p);
                 if (idx >= 0) {
@@ -38825,13 +38857,16 @@ static int JS_WriteObjectAtoms(BCWriterState *s)
     return -1;
 }
 
-uint8_t *JS_WriteObject2(JSContext *ctx, size_t *psize, JSValueConst obj,
-                         int flags, uint8_t ***psab_tab, size_t *psab_tab_len)
+static uint8_t *JS_WriteObject3(JSContext *ctx, size_t *psize, JSValueConst obj,
+                                int flags, uint8_t ***psab_tab, size_t *psab_tab_len,
+                                JSValueConst *transfer, int transfer_len)
 {
     BCWriterState ss, *s = &ss;
 
     memset(s, 0, sizeof(*s));
     s->ctx = ctx;
+    s->transfer = transfer;
+    s->transfer_len = transfer_len;
     s->allow_bytecode = ((flags & JS_WRITE_OBJ_BYTECODE) != 0);
     s->allow_sab = ((flags & JS_WRITE_OBJ_SAB) != 0);
     s->allow_reference = ((flags & JS_WRITE_OBJ_REFERENCE) != 0);
@@ -38869,10 +38904,44 @@ uint8_t *JS_WriteObject2(JSContext *ctx, size_t *psize, JSValueConst obj,
     return NULL;
 }
 
+uint8_t *JS_WriteObject2(JSContext *ctx, size_t *psize, JSValueConst obj,
+                         int flags, uint8_t ***psab_tab, size_t *psab_tab_len)
+{
+    return JS_WriteObject3(ctx, psize, obj, flags, psab_tab, psab_tab_len,
+                           NULL, 0);
+}
+
 uint8_t *JS_WriteObject(JSContext *ctx, size_t *psize, JSValueConst obj,
                         int flags)
 {
     return JS_WriteObject2(ctx, psize, obj, flags, NULL, NULL);
+}
+
+uint8_t *JS_WriteObjectTransfer(JSContext *ctx, size_t *psize, JSValueConst obj,
+                                int flags, JSValueConst *transfer,
+                                int transfer_len)
+{
+    JSObject *p;
+    int i, j;
+
+    *psize = 0;
+    if (transfer_len < 0)
+        transfer_len = 0;
+    for (i = 0; i < transfer_len; i++) {
+        if (JS_VALUE_GET_TAG(transfer[i]) != JS_TAG_OBJECT ||
+            !(p = JS_VALUE_GET_OBJ(transfer[i]))->is_transferable) {
+            JS_ThrowTypeError(ctx, "value is not transferable");
+            return NULL;
+        }
+        for (j = 0; j < i; j++) {
+            if (JS_VALUE_GET_OBJ(transfer[j]) == p) {
+                JS_ThrowTypeError(ctx, "duplicate transferable");
+                return NULL;
+            }
+        }
+    }
+    return JS_WriteObject3(ctx, psize, obj, flags, NULL, NULL, transfer,
+                           transfer_len);
 }
 
 typedef struct BCReaderState {
@@ -38891,6 +38960,9 @@ typedef struct BCReaderState {
     JSObject **objects;
     int objects_count;
     int objects_size;
+    /* the value each BC_TAG_TRANSFER index reads as */
+    JSValueConst *transfer;
+    int transfer_len;
 
 #ifdef DUMP_READ_OBJECT
     const uint8_t *ptr_last;
@@ -39955,6 +40027,19 @@ static JSValue JS_ReadObjectRec(BCReaderState *s)
             obj = JS_DupValue(ctx, JS_MKPTR(JS_TAG_OBJECT, s->objects[val]));
         }
         break;
+    case BC_TAG_TRANSFER:
+        {
+            uint32_t val;
+            if (bc_get_leb128(s, &val))
+                return JS_EXCEPTION;
+            bc_read_trace(s, "%u\n", val);
+            if (val >= (uint32_t)s->transfer_len) {
+                return JS_ThrowSyntaxError(ctx, "invalid transfer slot (%u >= %u)",
+                                           val, s->transfer_len);
+            }
+            obj = JS_DupValue(ctx, s->transfer[val]);
+        }
+        break;
     default:
     invalid_tag:
         return JS_ThrowSyntaxError(ctx, "invalid tag (tag=%d pos=%u)",
@@ -40019,6 +40104,12 @@ static void bc_reader_free(BCReaderState *s)
 JSValue JS_ReadObject(JSContext *ctx, const uint8_t *buf, size_t buf_len,
                        int flags)
 {
+    return JS_ReadObjectTransfer(ctx, buf, buf_len, flags, NULL, 0);
+}
+
+JSValue JS_ReadObjectTransfer(JSContext *ctx, const uint8_t *buf, size_t buf_len,
+                              int flags, JSValueConst *transfer, int transfer_len)
+{
     BCReaderState ss, *s = &ss;
     JSValue obj;
 
@@ -40035,6 +40126,8 @@ JSValue JS_ReadObject(JSContext *ctx, const uint8_t *buf, size_t buf_len,
     s->allow_sab = ((flags & JS_READ_OBJ_SAB) != 0);
     s->allow_reference = ((flags & JS_READ_OBJ_REFERENCE) != 0);
     s->compute_stack_size = ((flags & JS_READ_OBJ_COMPUTE_STACK_SIZE) != 0);
+    s->transfer = transfer;
+    s->transfer_len = transfer_len < 0 ? 0 : transfer_len;
     if (s->allow_bytecode)
         s->first_atom = JS_ATOM_END;
     else
