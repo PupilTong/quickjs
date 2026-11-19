@@ -977,6 +977,12 @@ int JS_GetStripInfo(JSRuntime *rt);
 
 /* set the [IsHTMLDDA] internal slot */
 void JS_SetIsHTMLDDA(JSContext *ctx, JSValueConst obj);
+/* JS_WriteObject() throws a TypeError ("uncloneable object") when it
+   meets 'obj', unless 'obj' is in the transfer list of
+   JS_WriteObjectTransfer(). Only a 'transferable' object may be in that
+   list; calling this again with transferable = FALSE (e.g. once the
+   object is detached) takes it out of what may be listed. */
+void JS_SetUncloneable(JSContext *ctx, JSValueConst obj, JS_BOOL transferable);
 
 typedef struct JSModuleDef JSModuleDef;
 
@@ -1030,6 +1036,13 @@ uint8_t *JS_WriteObject(JSContext *ctx, size_t *psize, JSValueConst obj,
                         int flags);
 uint8_t *JS_WriteObject2(JSContext *ctx, size_t *psize, JSValueConst obj,
                          int flags, uint8_t ***psab_tab, size_t *psab_tab_len);
+/* Write 'obj' with each transfer[i] written as transfer slot i wherever it
+   appears. Every entry must be a transferable object (JS_SetUncloneable())
+   and appear once, otherwise a TypeError is thrown ("value is not
+   transferable", "duplicate transferable") before anything is written. */
+uint8_t *JS_WriteObjectTransfer(JSContext *ctx, size_t *psize, JSValueConst obj,
+                                int flags, JSValueConst *transfer,
+                                int transfer_len);
 
 #define JS_READ_OBJ_BYTECODE  (1 << 0) /* allow function/module */
 #define JS_READ_OBJ_ROM_DATA  (1 << 1) /* avoid duplicating 'buf' data */
@@ -1047,6 +1060,10 @@ uint8_t *JS_WriteObject2(JSContext *ctx, size_t *psize, JSValueConst obj,
 #define JS_READ_OBJ_COMPUTE_STACK_SIZE (1 << 4)
 JSValue JS_ReadObject(JSContext *ctx, const uint8_t *buf, size_t buf_len,
                       int flags);
+/* Read a stream of JS_WriteObjectTransfer(): transfer slot i reads as
+   transfer[i]. A slot index >= transfer_len is a SyntaxError. */
+JSValue JS_ReadObjectTransfer(JSContext *ctx, const uint8_t *buf, size_t buf_len,
+                              int flags, JSValueConst *transfer, int transfer_len);
 /* Compile the regular expression 'pattern' with 'flags' (a string of
    RegExp flag letters, or JS_UNDEFINED for none) to the bytecode a
    RegExp object and a regular expression literal with the same pattern
